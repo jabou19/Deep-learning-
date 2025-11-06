@@ -1,0 +1,13 @@
+{
+  "os": "macOS-14.6-arm64-arm-64bit",
+  "python": "CPython 3.12.8",
+  "startedAt": "2025-11-06T17:02:02.788297Z",
+  "program": "/Users/otis/Downloads/DeepL/DeepL_Project/Test.py",
+  "codePath": "Downloads/DeepL/DeepL_Project/Test.py",
+  "codePathLocal": "Test.py",
+  "email": "1634535941@qq.com",
+  "root": "/Users/otis/Downloads/DeepL/DeepL_Project",
+  "host": "otisdeair.students.clients.local",
+  "executable": "/Users/otis/Downloads/DeepL/DeepL_Project/ffnn_env/bin/python",
+  "writerId": "2oln9q3bd1qfuyt6coxwc9uqz8y57uic"
+}
