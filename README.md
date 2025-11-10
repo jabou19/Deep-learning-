@@ -28,6 +28,7 @@ and how modern frameworks like PyTorch perform these steps under the hood.
 
 ## 🧩 Project Structure
 
+```
 DeepL_Project/
 │
 ├── ffnn.py # Core network implementation (forward + backward + train)
@@ -38,3 +39,4 @@ DeepL_Project/
 ├── requirements.txt # Dependencies
 ├── wandb/ # Local WandB run logs
 └── README.md # Project documentation
+```

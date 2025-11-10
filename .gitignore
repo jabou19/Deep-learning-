@@ -1,14 +1,20 @@
-__pycache__/     # Python 编译后的缓存文件（没用）
-*.pyc            # Python 编译文件（同上）
-*.pyo            # Python 优化编译文件（同上）
+# ---- Python Deep Learning Project .gitignore ----
 
-venv/            # 虚拟环境目录（可能叫 venv）
-env/             # 虚拟环境目录（另一常见名字）
-ffnn_env/        # 你项目里的虚拟环境目录，不上传
+# Python cache / build files
+__pycache__/
+*.py[cod]
+*.pyo
 
-data/            # 数据集文件夹，通常体积大，不推送
-wandb/           # Weights & Biases 日志缓存文件
+# Virtual environments
+venv/
+env/
+ffnn_env/
 
-.DS_Store        # macOS 自动生成的系统文件
-.idea/           # PyCharm 等 IDE 配置文件夹
-.vscode/         # VS Code 配置文件夹
+# Data and experiment logs
+data/
+wandb/
+
+# System / editor files
+.DS_Store
+.idea/
+.vscode/
