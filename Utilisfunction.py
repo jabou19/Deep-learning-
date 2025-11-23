@@ -1,12 +1,19 @@
 """
 Define and train a simple feed-forward neural network using only NumPy.
 
-Features:
-- Configurable: num_hidden_layers, n_hidden_units, learning_rate, batch_size,
+Features Configurable:
+- Num epochs, num_hidden_layers, n_hidden_units, learning_rate, batch_size,
   l2_coeff, weights_init, activation (relu/tanh/sigmoid), loss (mse/cross_entropy),
-  optimizer (currently: "sgd").
+  optimizer (currently: "Adam").
 - Implements forward pass, backward pass, mini-batch gradient descent,
-  and evaluation (accuracy, loss curves, confusion matrix).
+  and evaluation (accuracy curves, loss curves, confusion matrix).
+- Implementation stages: 
+  •	Forward pass: matrix multiplications + activation functions
+  •	Loss computation: MSE or cross-entropy with L2 regularization
+  •	Backward pass: manual derivative calculation and weight updates
+  •	Training loop: mini-batch gradient descent
+  •	Evaluation: compute accuracy, loss curves, and confusion matrices
+
 """
 
 import numpy as np
@@ -16,7 +23,7 @@ from typing import List, Tuple, Optional
 # ============================================================
 # Utilities
 # ============================================================
-
+ # convert integer labels to one-hot vectors
 def one_hot(y: np.ndarray, num_classes: int) -> np.ndarray:
     """Convert integer labels to one-hot vectors."""
     y = y.astype(int)
@@ -24,12 +31,35 @@ def one_hot(y: np.ndarray, num_classes: int) -> np.ndarray:
     oh[np.arange(y.size), y] = 1.0
     return oh
 
-
+# compute accuracy between predicted and target labels
 def accuracy(pred: np.ndarray, target: np.ndarray) -> float:
     """Compute classification accuracy from probabilities/logits and labels."""
-    ## accuracy calculation between predicted and target labels
     y_pred = np.argmax(pred, axis=1)
     return float((y_pred == target).mean())
+
+#TODO compute histograms of parameters per layer
+def compute_parameter_histograms(
+    weights: List[np.ndarray],
+    biases: List[np.ndarray],
+    bins: int = 20,
+) -> List[dict]:
+    """Summarize per-layer parameter distributions for basic diagnostics."""
+    histograms: List[dict] = []
+    for W, b in zip(weights, biases):
+        layer_params = np.concatenate((W.ravel(), b.ravel()))
+        counts, bin_edges = np.histogram(layer_params, bins=bins)
+        histograms.append({"counts": counts, "bin_edges": bin_edges})
+    return histograms
+
+# TODO compute gradient norms per layer
+def compute_layer_gradient_norms(dW: List[np.ndarray], db: List[np.ndarray]) -> List[float]:
+    """Return L2 norms of gradients per layer (weights + biases)."""
+    norms: List[float] = []
+    for grad_W, grad_b in zip(dW, db):
+        # Combine gradients here so spikes in either weights or biases surface.
+        layer_grad = np.concatenate((grad_W.ravel(), grad_b.ravel()))
+        norms.append(float(np.linalg.norm(layer_grad)))
+    return norms
 
 
 # ============================================================
@@ -42,7 +72,7 @@ class Activation:
         if name not in {"relu", "tanh", "sigmoid"}:
             raise ValueError(f"Unsupported activation: {name}")
         self.name = name
-
+    # Activation function (relu/tanh/sigmoid)
     def __call__(self, x: np.ndarray) -> np.ndarray:
         if self.name == "relu":
             return np.maximum(0, x)
@@ -52,7 +82,7 @@ class Activation:
         if self.name == "sigmoid":
             return 1.0 / (1.0 + np.exp(-x))
         raise RuntimeError
-    
+    # Derivative of activation function (relu/tanh/sigmoid)
     def derivative(self, x: np.ndarray) -> np.ndarray:
         if self.name == "relu":
            # return (x > 0).astype(np.float32)
@@ -122,7 +152,7 @@ def init_weights(shape: Tuple[int, int], method: str) -> np.ndarray:
         return (np.random.randn(fan_in, fan_out) * np.sqrt(2.0 / fan_in)).astype(np.float32)
 
     # default: small normal
-    return (0.01 * np.random.randn(fan_in, fan_out)).astype(np.float32)
+    #TODOreturn (0.01 * np.random.randn(fan_in, fan_out)).astype(np.float32)
 
 
 # ============================================================
@@ -199,6 +229,7 @@ class FFNN:
 
     @staticmethod
     # lecture 1 page 36 softmax for classification
+    # Softmax function to convert logits to probabilities
     def _softmax(z: np.ndarray) -> np.ndarray:
         z_shifted = z - np.max(z, axis=1, keepdims=True)
         exp_z = np.exp(z_shifted)
@@ -212,8 +243,8 @@ class FFNN:
 
         # Hidden layers
         for i in range(self.num_hidden_layers):
-            z = a @ self.W[i] + self.b[i]
-            a = self.act(z)
+            z = a @ self.W[i] + self.b[i] # z is pre-activation
+            a = self.act(z) # act is activation function
             pre_activations.append(z)
             activations.append(a)
 
@@ -235,8 +266,8 @@ class FFNN:
             base += self.l2 * reg / (2.0 * y_true_oh.shape[0])
         return base
     # lecture 2 page 17 backward pass
+    """Backward pass; returns gradients (dW, db)."""
     def backward(self, pre_activations, activations, y_true_oh):
-        """Backward pass; returns gradients (dW, db)."""
         dW = [np.zeros_like(W) for W in self.W]
         db = [np.zeros_like(b) for b in self.b]
 
@@ -284,8 +315,8 @@ class FFNN:
             self.b[i] -= lr_t * mb_hat / (np.sqrt(vb_hat) + eps)
     # Predict probabilities 
     def predict_proba(self, x: np.ndarray) -> np.ndarray:
-        _, acts = self.forward(x)
-        return acts[-1]
+        _, acts = self.forward(x) ## [input, hidden_1, …, hidden_L, output]
+        return acts[-1] # -1 return output layer
     # Predict classes labels
     def predict(self, x: np.ndarray) -> np.ndarray:
         probs = self.predict_proba(x)
@@ -305,11 +336,13 @@ def iterate_minibatches(
     indices = np.arange(N)
     if shuffle:
         np.random.shuffle(indices)
+    if batch_size <= 0:
+        batch_size = N
     for start in range(0, N, batch_size):
-        end = start + batch_size
-        if end > N:
-            break
+        end = min(start + batch_size, N)
         batch_idx = indices[start:end]
+        if batch_idx.size == 0:
+            continue
         yield X[batch_idx], y[batch_idx]
 
 
@@ -325,13 +358,23 @@ def train_ffnn(
 ):
     """Train FFNN with mini-batch gradient descent."""
     num_classes = model.num_classes
-    history = {"train_loss": [], "train_acc": [], "valid_loss": [], "valid_acc": []}
+    print("number of classes",num_classes)
+    history = {
+        "train_loss": [],
+        "train_acc": [],
+        "valid_loss": [],
+        "valid_acc": [],
+        "grad_norms": [], # per-layer gradient norms
+        "param_histograms": [], # per-layer parameter histograms
+    }
     step = 0
     # this loop for epoch in range num_epochs
     for epoch in range(num_epochs):
         train_losses = []
         train_accs = []
-        #  this loop for mini-batches 
+        epoch_grad_norms = [0.0 for _ in model.W] # per-layer gradient norms
+        epoch_grad_steps = 0 # number of gradient updates in this epoch
+        #  this loop over mini-batches 
         for inputs, targets in iterate_minibatches(X_train, y_train, batch_size, shuffle=True):
             inputs_flat = inputs.reshape(inputs.shape[0], -1)
             targets_oh = one_hot(targets, num_classes)
@@ -343,30 +386,57 @@ def train_ffnn(
             dW, db = model.backward(pre_acts, acts, targets_oh)
             model.step(dW, db)
 
+            # TODOTrack gradient magnitudes to spot pathological training behaviour.
+            batch_norms = compute_layer_gradient_norms(dW, db)
+            for idx, norm_val in enumerate(batch_norms):
+                epoch_grad_norms[idx] += norm_val
+            epoch_grad_steps += 1
+
             train_losses.append(loss_val)
             train_accs.append(accuracy(y_pred, targets))
+            step += 1
         avg_train_loss = float(np.mean(train_losses))
         avg_train_acc = float(np.mean(train_accs))
         history["train_loss"].append(avg_train_loss)
         history["train_acc"].append(avg_train_acc)
 
-        # Validation
-        if X_valid is not None and y_valid is not None and step % validation_every_steps == 0:
-            Xv_flat = X_valid.reshape(X_valid.shape[0], -1)
-            yv_oh = one_hot(y_valid, num_classes)
-            # Forward pass
-            yv_pred = model.predict_proba(Xv_flat)
-            val_loss = model.compute_loss(yv_pred, yv_oh)
-            val_acc = accuracy(yv_pred, y_valid)
-        else:
-            val_loss = np.nan
-            val_acc = np.nan
+        # Validation (always once per epoch when validation data is supplied)
+        val_loss = np.nan
+        val_acc = np.nan
+        validation_step = step
+        if X_valid is not None and y_valid is not None:
+            val_losses = []
+            val_correct = 0
+            val_count = 0
+            val_batch_size = batch_size if batch_size > 0 else y_valid.shape[0]
+            # validation loop over mini-batches
+            for Xv_batch, yv_batch in iterate_minibatches(X_valid, y_valid, val_batch_size, shuffle=False):
+                Xv_flat = Xv_batch.reshape(Xv_batch.shape[0], -1)
+                yv_oh = one_hot(yv_batch, num_classes)
+                # Forward pass for validation
+                yv_pred = model.predict_proba(Xv_flat)
+                # Compute validation loss and accuracy
+                val_losses.append(model.compute_loss(yv_pred, yv_oh))
+                # Compute number of correct predictions
+                val_correct += (np.argmax(yv_pred, axis=1) == yv_batch).sum()
+                val_count += yv_batch.size
+            val_loss = float(np.mean(val_losses)) if val_losses else np.nan
+            val_acc = float(val_correct / val_count) if val_count else np.nan
 
         history["valid_loss"].append(float(val_loss))
         history["valid_acc"].append(float(val_acc))
+        if epoch_grad_steps:
+            avg_grad_norms = [val / epoch_grad_steps for val in epoch_grad_norms]
+        else:
+            avg_grad_norms = [np.nan for _ in epoch_grad_norms]
+            #TODO 
+        history["grad_norms"].append(avg_grad_norms)
+        # Parameter histograms help confirm weights stay well-distributed.
+        histograms = compute_parameter_histograms(model.W, model.b)
+        history["param_histograms"].append(histograms)
 
         print(
-            f"Epoch {epoch+1:03d} |.... "
+            f"Epoch {epoch:02d} | validation step {validation_step:04d} | "
             f"train loss: {avg_train_loss:.4f}, train acc: {avg_train_acc:.4f} | "
             f"valid loss: {val_loss:.4f}, valid acc: {val_acc:.4f}"
         )
