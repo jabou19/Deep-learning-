@@ -624,6 +624,10 @@ def run_wandb_sweep(
     entity: Optional[str] = None,
     X_valid: Optional[np.ndarray] = None,
     y_valid: Optional[np.ndarray] = None,
+    X_test: Optional[np.ndarray] = None,
+    y_test: Optional[np.ndarray] = None,
+    class_names: Optional[np.ndarray] = None,
+    log_artifacts: bool = True,
     sweep_name: Optional[str] = None,
     config_overrides: Optional[Dict[str, Any]] = None,
     init_kwargs: Optional[Dict[str, Any]] = None,
@@ -671,7 +675,7 @@ def run_wandb_sweep(
             )
             num_epochs = int(config.get("num_epochs", 10))
             batch_size = int(config.get("batch_size", 64))
-            train_ffnn(
+            history = train_ffnn(
                 model,
                 X_train,
                 y_train,
@@ -681,6 +685,20 @@ def run_wandb_sweep(
                 batch_size=batch_size,
                 wandb_run=run,
             )
+
+            if log_artifacts and X_test is not None and y_test is not None:
+                artifacts = prepare_training_artifacts(
+                    model,
+                    history,
+                    X_test=X_test,
+                    y_test=y_test,
+                    class_names=class_names,
+                )
+                log_wandb_artifacts(
+                    run,
+                    artifacts,
+                    extra_summary={"summary/train_epochs": num_epochs},
+                )
 
     sweep_id = wandb_module.sweep(sweep_config, project=project, entity=entity)
     wandb_module.agent(sweep_id, function=_trainable, count=count)
