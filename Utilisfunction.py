@@ -557,15 +557,15 @@ def build_wandb_sweep_configs() -> Dict[str, Dict[str, Any]]:
     """Return example sweep configurations for random and Bayesian runs."""
     metric = {"name": "metrics/valid_accuracy", "goal": "maximize"}
     parameters = {
-        "num_hidden_layers": {"values": [1, 2, 3]},
-        "n_hidden_units": {"values": [128, 256, 384]},
-        "learning_rate": {"values": [5e-4, 1e-3, 2e-3]},
-        "batch_size": {"values": [64, 100, 128]},
-        "l2_coeff": {"values": [0.0, 1e-4, 1e-3]},
+        "num_hidden_layers": {"values": [2]},
+        "n_hidden_units": {"values": [ 256]},
+        "learning_rate": {"values": [5e-4, 1e-3,]},
+        "batch_size": {"values": [100]},
+        "l2_coeff": {"values": [ 1e-4, 1e-3]},
         "activation": {"values": ["relu","sigmoid", "tanh"]},
         "weights_init": {"values": ["he", "xavier"]},
         "optimizer": {"values": ["adam"]},
-        "num_epochs": {"values": [10, 15]},
+        "num_epochs": {"values": [15]},
     }
     random_cfg = {
         "method": "random",
