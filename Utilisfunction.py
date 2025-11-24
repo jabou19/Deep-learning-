@@ -16,9 +16,26 @@ Features Configurable:
 
 """
 
+import importlib
+import copy
+
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
+
+_WANDB_MODULE: Optional[Any] = None
+
+def _ensure_wandb() -> Optional[Any]:
+    """Dynamically import wandb if it is available in the environment."""
+    global _WANDB_MODULE
+    if _WANDB_MODULE is not None:
+        return _WANDB_MODULE
+    try:
+        module = importlib.import_module("wandb")
+    except ImportError:
+        return None
+    _WANDB_MODULE = module
+    return module
 
 # ============================================================
 # Utilities
@@ -182,7 +199,21 @@ class FFNN:
         self.loss_fn = Loss(loss)
         self.lr = learning_rate #lr: learning rate
         self.l2 = l2_coeff # L2 regularization coefficient
-        self.weights_init = weights_init
+        requested_init = str(weights_init).lower()
+        recommended_init = "he" if self.act.name == "relu" else "xavier"
+        if requested_init not in {"he", "xavier"}:
+            resolved_init = recommended_init
+        else:
+            resolved_init = requested_init
+        if self.act.name == "relu" and resolved_init != "he":
+            resolved_init = "he"
+        if self.act.name in {"tanh", "sigmoid"} and resolved_init != "xavier":
+            resolved_init = "xavier"
+        if resolved_init != requested_init:
+            print(
+                f"Adjusted weights_init to '{resolved_init}' to match activation '{self.act.name}'."
+            )
+        self.weights_init = resolved_init
        
         optimizer = optimizer.lower()
         if optimizer not in {"adam"}:
@@ -206,7 +237,7 @@ class FFNN:
         # Input -> hidden layers
         prev_dim = input_dim
         for _ in range(num_hidden_layers):
-            W = init_weights((prev_dim, n_hidden_units), weights_init)
+            W = init_weights((prev_dim, n_hidden_units), self.weights_init)
             b = np.zeros((1, n_hidden_units), dtype=np.float32)
             self.W.append(W)
             self.b.append(b)
@@ -218,7 +249,7 @@ class FFNN:
             prev_dim = n_hidden_units
 
         # Last hidden -> output
-        W_out = init_weights((prev_dim, num_classes), weights_init)
+        W_out = init_weights((prev_dim, num_classes), self.weights_init)
         b_out = np.zeros((1, num_classes), dtype=np.float32)
         self.W.append(W_out)
         self.b.append(b_out)
@@ -234,6 +265,22 @@ class FFNN:
         z_shifted = z - np.max(z, axis=1, keepdims=True)
         exp_z = np.exp(z_shifted)
         return exp_z / np.sum(exp_z, axis=1, keepdims=True)
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return a serialisable snapshot of the main hyperparameters."""
+        return {
+            "input_dim": self.input_dim,
+            "num_classes": self.num_classes,
+            "num_hidden_layers": self.num_hidden_layers,
+            "n_hidden_units": self.n_hidden_units,
+            "activation": self.act.name,
+            "loss": self.loss_fn.name,
+            "learning_rate": self.lr,
+            "l2_coeff": self.l2,
+            "weights_init": self.weights_init,
+            "optimizer": self.optimizer,
+        }
+
     # lecture 2 page 14 forward pass 17 
     """Forward pass; returns (pre_activations, activations)."""
     def forward(self, x: np.ndarray):
@@ -355,6 +402,7 @@ def train_ffnn(
     num_epochs: int = 0,
     batch_size: int = 0,
     validation_every_steps: int = 0,
+    wandb_run: Optional[Any] = None,
 ):
     """Train FFNN with mini-batch gradient descent."""
     num_classes = model.num_classes
@@ -367,6 +415,15 @@ def train_ffnn(
         "grad_norms": [], # per-layer gradient norms
         "param_histograms": [], # per-layer parameter histograms
     }
+    wandb_module = _ensure_wandb() if wandb_run is not None else None
+    if wandb_run is not None and wandb_module is None:
+        raise RuntimeError("wandb_run supplied but wandb package is unavailable.")
+    if wandb_run is not None:
+        # Persist key hyperparameters when they are not already set (avoids sweep locks).
+        existing_config = getattr(wandb_run, "config", {})
+        for key, value in model.get_config().items():
+            if key not in existing_config:
+                existing_config[key] = value
     step = 0
     # this loop for epoch in range num_epochs
     for epoch in range(num_epochs):
@@ -435,10 +492,433 @@ def train_ffnn(
         histograms = compute_parameter_histograms(model.W, model.b)
         history["param_histograms"].append(histograms)
 
+        if wandb_run is not None and wandb_module is not None:
+            log_payload: Dict[str, Any] = {
+                "epoch": epoch,
+                "global_step": step,
+                "metrics/train_loss": avg_train_loss,
+                "metrics/train_accuracy": avg_train_acc,
+                "metrics/valid_loss": val_loss,
+                "metrics/valid_accuracy": val_acc,
+            }
+            for layer_idx, norm in enumerate(avg_grad_norms):
+                log_payload[f"grad_norms/layer_{layer_idx}"] = norm
+            for layer_idx, (W, b) in enumerate(zip(model.W, model.b)):
+                layer_params = np.concatenate((W.ravel(), b.ravel()))
+                log_payload[f"params/layer_{layer_idx}"] = wandb_module.Histogram(layer_params)
+
+            wandb_run.log(log_payload, step=step)
+
         print(
             f"Epoch {epoch:02d} | validation step {validation_step:04d} | "
             f"train loss: {avg_train_loss:.4f}, train acc: {avg_train_acc:.4f} | "
             f"valid loss: {val_loss:.4f}, valid acc: {val_acc:.4f}"
         )
 
+    if wandb_run is not None and wandb_module is not None:
+        # Populate summary metrics for quick leaderboard comparisons.
+        best_valid_acc = np.nan
+        if history["valid_acc"]:
+            valid_acc_array = np.asarray(history["valid_acc"], dtype=np.float32)
+            if not np.all(np.isnan(valid_acc_array)):
+                best_valid_acc = float(np.nanmax(valid_acc_array))
+        wandb_run.summary.update(
+            {
+                "summary/final_train_loss": history["train_loss"][-1] if history["train_loss"] else np.nan,
+                "summary/final_train_accuracy": history["train_acc"][-1] if history["train_acc"] else np.nan,
+                "summary/final_valid_loss": history["valid_loss"][-1] if history["valid_loss"] else np.nan,
+                "summary/final_valid_accuracy": history["valid_acc"][-1] if history["valid_acc"] else np.nan,
+                "summary/best_valid_accuracy": best_valid_acc,
+            }
+        )
+
     return history
+
+
+def build_wandb_sweep_configs() -> Dict[str, Dict[str, Any]]:
+    """Return example sweep configurations for random and Bayesian runs."""
+    metric = {"name": "metrics/valid_accuracy", "goal": "maximize"}
+    parameters = {
+        "num_hidden_layers": {"values": [1, 2, 3]},
+        "n_hidden_units": {"values": [128, 256, 384]},
+        "learning_rate": {"values": [5e-4, 1e-3, 2e-3]},
+        "batch_size": {"values": [64, 100, 128]},
+        "l2_coeff": {"values": [0.0, 1e-4, 1e-3]},
+        "activation": {"values": ["relu","sigmoid", "tanh"]},
+        "weights_init": {"values": ["he", "xavier"]},
+        "optimizer": {"values": ["adam"]},
+        "num_epochs": {"values": [10, 15]},
+    }
+    random_cfg = {
+        "method": "random",
+        "metric": metric,
+        "parameters": parameters,
+        "early_terminate": {"type": "hyperband", "min_iter": 5},
+    }
+    bayes_cfg = {
+        "method": "bayes",
+        "metric": metric,
+        "parameters": parameters,
+        "early_terminate": {"type": "hyperband", "min_iter": 5},
+    }
+    grid_cfg = {
+        "method": "grid",
+        "metric": metric,
+        "parameters": parameters,
+    }
+    return {"random": random_cfg, "bayes": bayes_cfg, "grid": grid_cfg}
+
+
+def _infer_input_dim(data: np.ndarray) -> int:
+    """Infer flattened input dimensionality from training data."""
+    if data.ndim < 2:
+        raise ValueError("Expected `data` with shape (N, ...) for input inference.")
+    return int(np.prod(data.shape[1:]))
+
+
+def _infer_num_classes(y_train: np.ndarray, y_valid: Optional[np.ndarray]) -> int:
+    """Infer class count assuming zero-based integer labels."""
+    classes = np.unique(y_train)
+    if classes.size == 0:
+        raise ValueError("`y_train` must contain at least one label to infer classes.")
+    if y_valid is not None:
+        classes = np.union1d(classes, np.unique(y_valid))
+    return int(classes.max() + 1)
+
+
+def _deep_update_dict(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a deep-updated copy of `base` using `overrides`."""
+    result = copy.deepcopy(base)
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_update_dict(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def run_wandb_sweep(
+    method: str,
+    X_train: np.ndarray,
+    y_train: np.ndarray,
+    *,
+    project: str,
+    entity: Optional[str] = None,
+    X_valid: Optional[np.ndarray] = None,
+    y_valid: Optional[np.ndarray] = None,
+    sweep_name: Optional[str] = None,
+    config_overrides: Optional[Dict[str, Any]] = None,
+    init_kwargs: Optional[Dict[str, Any]] = None,
+    count: Optional[int] = None,
+) -> str:
+    """Launch a W&B sweep that reuses `train_ffnn` for each sampled config."""
+
+    wandb_module = _ensure_wandb()
+    if wandb_module is None:
+        raise RuntimeError("wandb is required to launch sweeps. Install wandb and login before calling.")
+
+    sweep_configs = build_wandb_sweep_configs()
+    if method not in sweep_configs:
+        available = ", ".join(sorted(sweep_configs))
+        raise ValueError(f"Unknown sweep method '{method}'. Available methods: {available}.")
+
+    sweep_config = copy.deepcopy(sweep_configs[method])
+    if sweep_name:
+        sweep_config.setdefault("name", sweep_name)
+    if config_overrides:
+        sweep_config = _deep_update_dict(sweep_config, config_overrides)
+
+    input_dim = _infer_input_dim(X_train)
+    num_classes = _infer_num_classes(y_train, y_valid)
+
+    init_args = dict(init_kwargs) if init_kwargs else {}
+    init_args.setdefault("project", project)
+    if entity is not None:
+        init_args.setdefault("entity", entity)
+
+    def _trainable() -> None:
+        with wandb_module.init(**init_args) as run:
+            config = run.config
+            model = FFNN(
+                input_dim=input_dim,
+                num_classes=num_classes,
+                num_hidden_layers=int(config.get("num_hidden_layers", 1)),
+                n_hidden_units=int(config.get("n_hidden_units", 128)),
+                activation=str(config.get("activation", "relu")).lower(),
+                loss=str(config.get("loss", "cross_entropy")).lower(),
+                learning_rate=float(config.get("learning_rate", 1e-3)),
+                l2_coeff=float(config.get("l2_coeff", 0.0)),
+                weights_init=str(config.get("weights_init", "he")).lower(),
+                optimizer=str(config.get("optimizer", "adam")).lower(),
+            )
+            num_epochs = int(config.get("num_epochs", 10))
+            batch_size = int(config.get("batch_size", 64))
+            train_ffnn(
+                model,
+                X_train,
+                y_train,
+                X_valid=X_valid,
+                y_valid=y_valid,
+                num_epochs=num_epochs,
+                batch_size=batch_size,
+                wandb_run=run,
+            )
+
+    sweep_id = wandb_module.sweep(sweep_config, project=project, entity=entity)
+    wandb_module.agent(sweep_id, function=_trainable, count=count)
+    return sweep_id
+
+
+def create_loss_figure(history: Dict[str, List[float]]) -> Optional[Any]:
+    """Build a loss curve figure from the training history."""
+    train_loss = history.get("train_loss", [])
+    valid_loss = history.get("valid_loss", [])
+    if not train_loss:
+        return None
+    fig, ax = plt.subplots()
+    ax.plot(train_loss, label="train loss")
+    if valid_loss:
+        ax.plot(valid_loss, label="valid loss")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.set_title("Training and validation loss")
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
+
+def create_gradient_norm_figure(history: Dict[str, List[List[float]]], model: FFNN) -> Optional[Any]:
+    """Build a gradient norm figure from the training history."""
+    grad_norms = history.get("grad_norms", [])
+    if not grad_norms:
+        return None
+    grad_array = np.asarray(grad_norms, dtype=np.float32)
+    if grad_array.ndim != 2 or grad_array.size == 0:
+        return None
+    fig, ax = plt.subplots()
+    num_layers = grad_array.shape[1]
+    for layer_idx in range(num_layers):
+        if layer_idx < model.num_hidden_layers:
+            label = f"Hidden layer {layer_idx + 1}"
+        else:
+            label = "Output layer"
+        ax.plot(grad_array[:, layer_idx], label=label)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Gradient norm (L2)")
+    ax.set_title("Gradient norms across training")
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
+
+def create_param_hist_figure(history: Dict[str, List[List[dict]]], model: FFNN) -> Optional[Any]:
+    """Build parameter histogram figures for the final epoch."""
+    histograms = history.get("param_histograms", [])
+    if not histograms:
+        return None
+    final_hist = histograms[-1]
+    if not final_hist:
+        return None
+    n_layers = len(final_hist)
+    cols = min(3, n_layers)
+    rows = int(np.ceil(n_layers / cols)) if cols else 0
+    if rows == 0 or cols == 0:
+        return None
+    fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 3 * rows))
+    axes = np.atleast_1d(axes).reshape(rows, cols)
+    for layer_idx, layer_hist in enumerate(final_hist):
+        counts = layer_hist.get("counts")
+        bin_edges = layer_hist.get("bin_edges")
+        if counts is None or bin_edges is None:
+            continue
+        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        widths = np.diff(bin_edges)
+        ax = axes[layer_idx // cols, layer_idx % cols]
+        ax.bar(bin_centers, counts, width=widths, align="center")
+        if layer_idx < model.num_hidden_layers:
+            title = f"Hidden layer {layer_idx + 1} (weights+biases)"
+        else:
+            title = "Output layer (weights+biases)"
+        ax.set_title(title)
+        ax.set_xlabel("Value")
+        ax.set_ylabel("Count")
+    total_slots = rows * cols
+    for idx in range(len(final_hist), total_slots):
+        fig.delaxes(axes[idx // cols, idx % cols])
+    fig.tight_layout()
+    return fig
+
+
+def evaluate_model_on_test(
+    model: FFNN,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    *,
+    class_names: Optional[np.ndarray] = None,
+) -> Dict[str, Any]:
+    """Evaluate the trained model on the test set and build confusion matrices."""
+    X_test_arr = np.asarray(X_test)
+    if X_test_arr.ndim > 2:
+        X_test_flat = X_test_arr.reshape(X_test_arr.shape[0], -1)
+    else:
+        X_test_flat = X_test_arr
+    y_test_arr = np.asarray(y_test)
+    y_test_proba = model.predict_proba(X_test_flat)
+    y_pred_labels = np.argmax(y_test_proba, axis=1)
+    test_acc = accuracy(y_test_proba, y_test_arr)
+
+    inferred_classes = model.num_classes
+    if y_test_arr.size:
+        inferred_classes = max(inferred_classes, int(y_test_arr.max()) + 1)
+    if y_pred_labels.size:
+        inferred_classes = max(inferred_classes, int(y_pred_labels.max()) + 1)
+
+    conf_mat = np.zeros((inferred_classes, inferred_classes), dtype=int)
+    for yt, yp in zip(y_test_arr, y_pred_labels):
+        conf_mat[int(yt), int(yp)] += 1
+
+    row_sums = conf_mat.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1
+    conf_mat_norm = conf_mat / row_sums
+
+    class_names_list: Optional[List[str]] = None
+    if class_names is not None:
+        class_names_list = [str(name) for name in np.asarray(class_names).tolist()]
+
+    return {
+        "test_accuracy": test_acc,
+        "y_true": y_test_arr,
+        "y_pred_labels": y_pred_labels,
+        "y_test_proba": y_test_proba,
+        "confusion_matrix": conf_mat,
+        "confusion_matrix_normalized": conf_mat_norm,
+        "class_names": class_names_list,
+    }
+
+
+def create_confusion_matrix_figure(
+    conf_mat_norm: np.ndarray,
+    *,
+    class_names: Optional[List[str]] = None,
+    title: str = "Confusion Matrix",
+) -> Any:
+    """Build a confusion matrix heatmap figure."""
+    class_labels = class_names if class_names is not None else [str(i) for i in range(conf_mat_norm.shape[0])]
+    fig, ax = plt.subplots(figsize=(7, 6))
+    im = ax.imshow(conf_mat_norm, cmap="Reds", vmin=0.0, vmax=1.0)
+    ax.set_title(title)
+    ax.set_xlabel("Predicted class")
+    ax.set_ylabel("True class")
+    ax.set_xticks(np.arange(len(class_labels)))
+    ax.set_xticklabels(class_labels, rotation=45, ha="right")
+    ax.set_yticks(np.arange(len(class_labels)))
+    ax.set_yticklabels(class_labels)
+    for i in range(conf_mat_norm.shape[0]):
+        for j in range(conf_mat_norm.shape[1]):
+            value = conf_mat_norm[i, j]
+            text_color = "white" if value > 0.5 else "black"
+            ax.text(j, i, f"{value:.2f}", ha="center", va="center", color=text_color)
+    fig.colorbar(im, ax=ax, label="Proportion")
+    fig.tight_layout()
+    return fig
+
+
+def prepare_training_artifacts(
+    model: FFNN,
+    history: Dict[str, Any],
+    *,
+    X_test: np.ndarray,
+    y_test: np.ndarray,
+    class_names: Optional[np.ndarray] = None,
+) -> Dict[str, Any]:
+    """Construct reusable evaluation artifacts (figures, metrics, confusion table)."""
+
+    artifacts: Dict[str, Any] = {
+        "figures": {},
+        "metrics": {},
+        "summary": {},
+        "confusion_table": None,
+    }
+
+    loss_fig = create_loss_figure(history)
+    if loss_fig is not None:
+        artifacts["figures"]["plots/loss_curves"] = loss_fig
+
+    grad_fig = create_gradient_norm_figure(history, model)
+    if grad_fig is not None:
+        artifacts["figures"]["plots/gradient_norms"] = grad_fig
+
+    hist_fig = create_param_hist_figure(history, model)
+    if hist_fig is not None:
+        artifacts["figures"]["plots/param_histograms"] = hist_fig
+
+    eval_payload = evaluate_model_on_test(model, X_test, y_test, class_names=class_names)
+    test_acc = eval_payload["test_accuracy"]
+    artifacts["metrics"]["metrics/test_accuracy"] = test_acc
+    artifacts["summary"]["summary/test_accuracy"] = test_acc
+    artifacts["confusion_matrix"] = eval_payload["confusion_matrix"]
+    artifacts["confusion_matrix_normalized"] = eval_payload["confusion_matrix_normalized"]
+    artifacts["predictions"] = {
+        "y_true": eval_payload["y_true"],
+        "y_pred_labels": eval_payload["y_pred_labels"],
+    }
+
+    class_labels = eval_payload["class_names"]
+    if class_labels is None:
+        class_labels = [str(i) for i in range(eval_payload["confusion_matrix"].shape[0])]
+    artifacts["class_names"] = class_labels
+    conf_fig = create_confusion_matrix_figure(
+        eval_payload["confusion_matrix_normalized"],
+        class_names=class_labels,
+        title="Confusion Matrix",
+    )
+    artifacts["figures"]["plots/confusion_matrix"] = conf_fig
+
+    artifacts["confusion_table"] = {
+        "probs": None,
+        "y_true": eval_payload["y_true"].tolist(),
+        "preds": eval_payload["y_pred_labels"].tolist(),
+        "class_names": class_labels,
+    }
+
+    return artifacts
+
+
+def log_wandb_artifacts(
+    wandb_run: Optional[Any],
+    artifacts: Dict[str, Any],
+    *,
+    extra_summary: Optional[Dict[str, Any]] = None,
+    extra_logs: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Log prepared artifacts to a wandb run if available."""
+
+    if wandb_run is None:
+        return
+    wandb_module = _ensure_wandb()
+    if wandb_module is None:
+        return
+
+    log_payload: Dict[str, Any] = {}
+    for key, value in (artifacts.get("metrics") or {}).items():
+        log_payload[key] = value
+    for key, fig in (artifacts.get("figures") or {}).items():
+        log_payload[key] = wandb_module.Image(fig)
+    if extra_logs:
+        log_payload.update(extra_logs)
+    if log_payload:
+        wandb_run.log(log_payload)
+
+    confusion_payload = artifacts.get("confusion_table")
+    if confusion_payload and hasattr(wandb_module, "plot") and hasattr(wandb_module.plot, "confusion_matrix"):
+        wandb_run.log(
+            {
+                "plots/confusion_matrix_table": wandb_module.plot.confusion_matrix(**confusion_payload)
+            }
+        )
+
+    summary_updates = dict(artifacts.get("summary") or {})
+    if extra_summary:
+        summary_updates.update(extra_summary)
+    if summary_updates:
+        wandb_run.summary.update(summary_updates)
