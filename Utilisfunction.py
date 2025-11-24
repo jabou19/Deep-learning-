@@ -97,7 +97,7 @@ class Activation:
             return np.tanh(x)
             #return (np.exp(x) - np.exp(-x)) / (np.exp(x) + np.exp(-x))  #TODO : for ckecking code 
         if self.name == "sigmoid":
-            return 1.0 / (1.0 + np.exp(-x))
+            return self._sigmoid(x)
         raise RuntimeError
     # Derivative of activation function (relu/tanh/sigmoid)
     def derivative(self, x: np.ndarray) -> np.ndarray:
@@ -109,9 +109,25 @@ class Activation:
             #t= (np.exp(x) - np.exp(-x)) / (np.exp(x) + np.exp(-x))  #TODO : for ckecking code
             return 1.0 - t ** 2
         if self.name == "sigmoid":
-            s = 1.0 / (1.0 + np.exp(-x))
+            s = self._sigmoid(x)
             return s * (1.0 - s)
         raise RuntimeError
+
+    @staticmethod
+    def _sigmoid(x: np.ndarray) -> np.ndarray:
+        """Numerically stable sigmoid implementation."""
+        x = np.asarray(x)
+        if not np.issubdtype(x.dtype, np.floating):
+            x = x.astype(np.float32)
+        out = np.empty_like(x)
+        positive = x >= 0
+        if np.any(positive):
+            out[positive] = 1.0 / (1.0 + np.exp(-x[positive]))
+        negative = ~positive
+        if np.any(negative):
+            exp_x = np.exp(x[negative])
+            out[negative] = exp_x / (1.0 + exp_x)
+        return out
 
 
 # ============================================================
@@ -352,14 +368,16 @@ class FFNN:
             self.vW[i] = beta2 * self.vW[i] + (1 - beta2) * (dW[i] ** 2)
             mW_hat = self.mW[i] / (1 - beta1 ** self.t)
             vW_hat = self.vW[i] / (1 - beta2 ** self.t)
-            self.W[i] -= lr_t * mW_hat / (np.sqrt(vW_hat) + eps)
+            safe_vw = np.sqrt(np.maximum(vW_hat, 0.0)) + eps
+            self.W[i] -= lr_t * mW_hat / safe_vw
 
             # Update first and second moments for biases
             self.mb[i] = beta1 * self.mb[i] + (1 - beta1) * db[i]
             self.vb[i] = beta2 * self.vb[i] + (1 - beta2) * (db[i] ** 2)
             mb_hat = self.mb[i] / (1 - beta1 ** self.t)
             vb_hat = self.vb[i] / (1 - beta2 ** self.t)
-            self.b[i] -= lr_t * mb_hat / (np.sqrt(vb_hat) + eps)
+            safe_vb = np.sqrt(np.maximum(vb_hat, 0.0)) + eps
+            self.b[i] -= lr_t * mb_hat / safe_vb
     # Predict probabilities 
     def predict_proba(self, x: np.ndarray) -> np.ndarray:
         _, acts = self.forward(x) ## [input, hidden_1, …, hidden_L, output]
@@ -687,6 +705,24 @@ def create_loss_figure(history: Dict[str, List[float]]) -> Optional[Any]:
     return fig
 
 
+def create_accuracy_figure(history: Dict[str, List[float]]) -> Optional[Any]:
+    """Build an accuracy curve figure from the training history."""
+    train_acc = history.get("train_acc", [])
+    valid_acc = history.get("valid_acc", [])
+    if not train_acc:
+        return None
+    fig, ax = plt.subplots()
+    ax.plot(train_acc, label="train accuracy")
+    if valid_acc:
+        ax.plot(valid_acc, label="valid accuracy")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Accuracy")
+    ax.set_title("Training and validation accuracy")
+    ax.legend()
+    fig.tight_layout()
+    return fig
+
+
 def create_gradient_norm_figure(history: Dict[str, List[List[float]]], model: FFNN) -> Optional[Any]:
     """Build a gradient norm figure from the training history."""
     grad_norms = history.get("grad_norms", [])
@@ -745,6 +781,32 @@ def create_param_hist_figure(history: Dict[str, List[List[dict]]], model: FFNN) 
     total_slots = rows * cols
     for idx in range(len(final_hist), total_slots):
         fig.delaxes(axes[idx // cols, idx % cols])
+    fig.tight_layout()
+    return fig
+
+
+def create_weight_bias_hist_figure(model: FFNN, bins: int = 30) -> Optional[Any]:
+    """Plot separate histograms for weights and biases per layer."""
+    num_layers = len(model.W)
+    if num_layers == 0:
+        return None
+    fig, axes = plt.subplots(num_layers, 2, figsize=(8, 3 * num_layers))
+    axes = np.atleast_2d(axes)
+    for layer_idx, (W, b) in enumerate(zip(model.W, model.b)):
+        weight_ax = axes[layer_idx, 0]
+        bias_ax = axes[layer_idx, 1]
+        weight_ax.hist(W.ravel(), bins=bins, color="tab:blue", alpha=0.8)
+        bias_ax.hist(b.ravel(), bins=max(5, bins // 2), color="tab:orange", alpha=0.8)
+        if layer_idx < model.num_hidden_layers:
+            layer_name = f"Hidden layer {layer_idx + 1}"
+        else:
+            layer_name = "Output layer"
+        weight_ax.set_title(f"{layer_name} weights")
+        bias_ax.set_title(f"{layer_name} biases")
+        weight_ax.set_xlabel("Value")
+        bias_ax.set_xlabel("Value")
+        weight_ax.set_ylabel("Count")
+        bias_ax.set_ylabel("Count")
     fig.tight_layout()
     return fig
 
@@ -840,17 +902,25 @@ def prepare_training_artifacts(
         "confusion_table": None,
     }
 
+    acc_fig = create_accuracy_figure(history)
+    if acc_fig is not None:
+        artifacts["figures"]["accuracy_curves"] = acc_fig
+
     loss_fig = create_loss_figure(history)
     if loss_fig is not None:
-        artifacts["figures"]["plots/loss_curves"] = loss_fig
+        artifacts["figures"]["loss_curves"] = loss_fig
 
     grad_fig = create_gradient_norm_figure(history, model)
     if grad_fig is not None:
-        artifacts["figures"]["plots/gradient_norms"] = grad_fig
+        artifacts["figures"]["gradient_norms"] = grad_fig
 
     hist_fig = create_param_hist_figure(history, model)
     if hist_fig is not None:
-        artifacts["figures"]["plots/param_histograms"] = hist_fig
+        artifacts["figures"]["param_histograms"] = hist_fig
+
+    weight_bias_fig = create_weight_bias_hist_figure(model)
+    if weight_bias_fig is not None:
+        artifacts["figures"]["weight_bias_histograms"] = weight_bias_fig
 
     eval_payload = evaluate_model_on_test(model, X_test, y_test, class_names=class_names)
     test_acc = eval_payload["test_accuracy"]
@@ -872,7 +942,7 @@ def prepare_training_artifacts(
         class_names=class_labels,
         title="Confusion Matrix",
     )
-    artifacts["figures"]["plots/confusion_matrix"] = conf_fig
+    artifacts["figures"]["confusion_matrix"] = conf_fig
 
     artifacts["confusion_table"] = {
         "probs": None,
