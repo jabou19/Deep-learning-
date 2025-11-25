@@ -21,7 +21,7 @@ import copy
 
 import numpy as np
 import matplotlib.pyplot as plt
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional, Dict, Any, Mapping
 
 _WANDB_MODULE: Optional[Any] = None
 
@@ -204,7 +204,7 @@ class FFNN:
         loss: str = "c",
         learning_rate: float = 0.0,
         l2_coeff: float = 0.0,
-        weights_init: str = "h",
+        weights_init: str = "he",
         optimizer: str = "adam",
     ):
         self.input_dim = input_dim
@@ -216,20 +216,21 @@ class FFNN:
         self.lr = learning_rate #lr: learning rate
         self.l2 = l2_coeff # L2 regularization coefficient
         requested_init = str(weights_init).lower()
-        recommended_init = "he" if self.act.name == "relu" else "xavier"
+        init_aliases = {
+            "h": "he",
+            "he": "he",
+            "x": "xavier",
+            "glorot": "xavier",
+            "xavier": "xavier",
+        }
+        requested_init = init_aliases.get(requested_init, requested_init)
         if requested_init not in {"he", "xavier"}:
-            resolved_init = recommended_init
-        else:
-            resolved_init = requested_init
-        if self.act.name == "relu" and resolved_init != "he":
-            resolved_init = "he"
-        if self.act.name in {"tanh", "sigmoid"} and resolved_init != "xavier":
-            resolved_init = "xavier"
-        if resolved_init != requested_init:
-            print(
-                f"Adjusted weights_init to '{resolved_init}' to match activation '{self.act.name}'."
-            )
-        self.weights_init = resolved_init
+            raise ValueError("weights_init must be either 'he' or 'xavier'.")
+        if self.act.name == "relu" and requested_init != "he":
+            raise ValueError("Use He initialization with ReLU hidden layers.")
+        if self.act.name in {"tanh", "sigmoid"} and requested_init != "xavier":
+            raise ValueError("Use Xavier initialization with tanh or sigmoid hidden layers.")
+        self.weights_init = requested_init
        
         optimizer = optimizer.lower()
         if optimizer not in {"adam"}:
@@ -343,7 +344,7 @@ class FFNN:
         dW[-1] = a_prev.T @ delta + self.l2 * self.W[-1]
         db[-1] = np.sum(delta, axis=0, keepdims=True)
 
-        # Hidden layers backwards
+            # Hidden layers backward
         for i in range(self.num_hidden_layers - 1, -1, -1):
             z = pre_activations[i]
             da = delta @ self.W[i + 1].T
@@ -442,6 +443,12 @@ def train_ffnn(
         for key, value in model.get_config().items():
             if key not in existing_config:
                 existing_config[key] = value
+        # Combined label for W&B charts: (weights_init + activation_function)
+        try:
+            existing_config["label_W_A"] = f"{model.weights_init} + {model.act.name}"
+        except Exception:
+            # Fail silently to avoid any CLI output or training disruption.
+            pass
     step = 0
     # this loop for epoch in range num_epochs
     for epoch in range(num_epochs):
@@ -540,15 +547,21 @@ def train_ffnn(
             valid_acc_array = np.asarray(history["valid_acc"], dtype=np.float32)
             if not np.all(np.isnan(valid_acc_array)):
                 best_valid_acc = float(np.nanmax(valid_acc_array))
-        wandb_run.summary.update(
-            {
-                "summary/final_train_loss": history["train_loss"][-1] if history["train_loss"] else np.nan,
-                "summary/final_train_accuracy": history["train_acc"][-1] if history["train_acc"] else np.nan,
-                "summary/final_valid_loss": history["valid_loss"][-1] if history["valid_loss"] else np.nan,
-                "summary/final_valid_accuracy": history["valid_acc"][-1] if history["valid_acc"] else np.nan,
-                "summary/best_valid_accuracy": best_valid_acc,
-            }
-        )
+        summary_payload: Dict[str, Any] = {
+            "summary/final_train_loss": history["train_loss"][-1] if history["train_loss"] else np.nan,
+            "summary/final_train_accuracy": history["train_acc"][-1] if history["train_acc"] else np.nan,
+            "summary/final_valid_loss": history["valid_loss"][-1] if history["valid_loss"] else np.nan,
+            "summary/final_valid_accuracy": history["valid_acc"][-1] if history["valid_acc"] else np.nan,
+            "summary/best_valid_accuracy": best_valid_acc,
+        }
+        if hasattr(wandb_run, "config"):
+            activation_name = str(wandb_run.config.get("activation", "") or "").strip()
+            weights_init_name = str(wandb_run.config.get("weights_init", "") or "").strip()
+            if activation_name:
+                summary_payload["summary/activation"] = activation_name
+            if weights_init_name:
+                summary_payload["summary/weights_init"] = weights_init_name
+        wandb_run.summary.update(summary_payload)
 
     return history
 
@@ -558,12 +571,11 @@ def build_wandb_sweep_configs() -> Dict[str, Dict[str, Any]]:
     metric = {"name": "metrics/valid_accuracy", "goal": "maximize"}
     parameters = {
         "num_hidden_layers": {"values": [2]},
-        "n_hidden_units": {"values": [ 256]},
-        "learning_rate": {"values": [5e-4, 1e-3,]},
+        "n_hidden_units": {"values": [256]},
+        "learning_rate": {"values": [5e-4]},
         "batch_size": {"values": [100]},
-        "l2_coeff": {"values": [ 1e-4, 1e-3]},
-        "activation": {"values": ["relu","sigmoid", "tanh"]},
-        "weights_init": {"values": ["he", "xavier"]},
+        "l2_coeff": {"values": [1e-3]},
+        "activation": {"values": ["relu", "sigmoid", "tanh"]},
         "optimizer": {"values": ["adam"]},
         "num_epochs": {"values": [15]},
     }
@@ -584,7 +596,7 @@ def build_wandb_sweep_configs() -> Dict[str, Dict[str, Any]]:
         "metric": metric,
         "parameters": parameters,
     }
-    return {"random": random_cfg, "bayes": bayes_cfg, "grid": grid_cfg}
+    return {"random": random_cfg, "Bayesian": bayes_cfg, "grid": grid_cfg}
 
 
 def _infer_input_dim(data: np.ndarray) -> int:
@@ -613,6 +625,37 @@ def _deep_update_dict(base: Dict[str, Any], overrides: Dict[str, Any]) -> Dict[s
         else:
             result[key] = value
     return result
+
+
+def _resolve_activation_init_from_config(config: Mapping[str, Any]) -> Tuple[str, str]:
+    """Return activation and initializer while enforcing explicit pairing."""
+    activation = str(config.get("activation", "relu")).strip().lower()
+    if activation not in {"relu", "sigmoid", "tanh"}:
+        raise ValueError(f"Unsupported activation '{activation}' in sweep config.")
+
+    raw_init = config.get("weights_init")
+    if raw_init is None or str(raw_init).strip() == "":
+        weights_init = "he" if activation == "relu" else "xavier"
+    else:
+        weights_init = str(raw_init).strip().lower()
+
+    init_aliases = {
+        "h": "he",
+        "he": "he",
+        "x": "xavier",
+        "glorot": "xavier",
+        "xavier": "xavier",
+    }
+    weights_init = init_aliases.get(weights_init, weights_init)
+
+    if weights_init not in {"he", "xavier"}:
+        raise ValueError("weights_init must be 'he' or 'xavier'.")
+    if activation == "relu" and weights_init != "he":
+        raise ValueError("ReLU hidden layers must use He initialization.")
+    if activation in {"sigmoid", "tanh"} and weights_init != "xavier":
+        raise ValueError("Sigmoid/tanh hidden layers must use Xavier initialization.")
+
+    return activation, weights_init
 
 
 def run_wandb_sweep(
@@ -661,16 +704,19 @@ def run_wandb_sweep(
     def _trainable() -> None:
         with wandb_module.init(**init_args) as run:
             config = run.config
+            activation, weights_init = _resolve_activation_init_from_config(config)
+            run.config.update({"activation": activation, "weights_init": weights_init}, allow_val_change=True)
+            print(f"wandb:\tweights_init: {weights_init}")
             model = FFNN(
                 input_dim=input_dim,
                 num_classes=num_classes,
                 num_hidden_layers=int(config.get("num_hidden_layers", 1)),
                 n_hidden_units=int(config.get("n_hidden_units", 128)),
-                activation=str(config.get("activation", "relu")).lower(),
+                activation=activation,
                 loss=str(config.get("loss", "cross_entropy")).lower(),
                 learning_rate=float(config.get("learning_rate", 1e-3)),
                 l2_coeff=float(config.get("l2_coeff", 0.0)),
-                weights_init=str(config.get("weights_init", "he")).lower(),
+                weights_init=weights_init,
                 optimizer=str(config.get("optimizer", "adam")).lower(),
             )
             num_epochs = int(config.get("num_epochs", 10))
@@ -705,7 +751,168 @@ def run_wandb_sweep(
     return sweep_id
 
 
-def create_loss_figure(history: Dict[str, List[float]]) -> Optional[Any]:
+def summarize_activation_init_performance(
+    project: str,
+    *,
+    entity: Optional[str] = None,
+    max_runs: Optional[int] = None,
+    print_table: bool = True,
+) -> List[Dict[str, Any]]:
+    """Summarise validation performance grouped by activation/initializer pairs.
+
+    Pulls runs from the specified W&B project, aggregates the recorded
+    ``summary/activation`` and ``summary/weights_init`` pairs, and reports the
+    mean/max validation accuracy across runs for each pairing. Returns a list of
+    summary dictionaries (one per pairing) sorted by mean best validation
+    accuracy. Optionally prints a compact table for quick inspection.
+    """
+
+    wandb_module = _ensure_wandb()
+    if wandb_module is None:
+        raise RuntimeError("wandb is required to summarise activation/init performance.")
+
+    api = wandb_module.Api()
+    project_path = f"{entity}/{project}" if entity else project
+    try:
+        runs = api.runs(project_path)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to fetch runs from '{project_path}': {exc}") from exc
+
+    def _mean_max(values: List[Optional[float]]) -> Tuple[float, float]:
+        arr = np.asarray([v for v in values if v is not None], dtype=np.float32)
+        if arr.size == 0:
+            return float(np.nan), float(np.nan)
+        return float(np.nanmean(arr)), float(np.nanmax(arr))
+
+    aggregates: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    processed = 0
+    for run in runs:
+        if max_runs is not None and processed >= max_runs:
+            break
+        summary = getattr(run, "summary", {})
+        config = getattr(run, "config", {})
+        activation = str(summary.get("summary/activation") or config.get("activation") or "").strip().lower()
+        weights_init = str(summary.get("summary/weights_init") or config.get("weights_init") or "").strip().lower()
+        if not activation or not weights_init:
+            continue
+        key = (activation, weights_init)
+        best_valid_acc = summary.get("summary/best_valid_accuracy")
+        final_valid_acc = summary.get("summary/final_valid_accuracy")
+        final_train_acc = summary.get("summary/final_train_accuracy")
+        aggregates.setdefault(
+            key,
+            {
+                "activation": activation,
+                "weights_init": weights_init,
+                "best_valid_acc_values": [],
+                "final_valid_acc_values": [],
+                "final_train_acc_values": [],
+            },
+        )
+        group = aggregates[key]
+        group.setdefault("run_ids", []).append(run.id)
+        group["best_valid_acc_values"].append(best_valid_acc if best_valid_acc is not None else None)
+        group["final_valid_acc_values"].append(final_valid_acc if final_valid_acc is not None else None)
+        group["final_train_acc_values"].append(final_train_acc if final_train_acc is not None else None)
+        processed += 1
+
+    summaries: List[Dict[str, Any]] = []
+    for group in aggregates.values():
+        best_mean, best_max = _mean_max(group["best_valid_acc_values"])
+        final_val_mean, final_val_max = _mean_max(group["final_valid_acc_values"])
+        final_train_mean, final_train_max = _mean_max(group["final_train_acc_values"])
+        summaries.append(
+            {
+                "activation": group["activation"],
+                "weights_init": group["weights_init"],
+                "run_count": len(group.get("run_ids", [])),
+                "best_valid_acc_mean": best_mean,
+                "best_valid_acc_max": best_max,
+                "final_valid_acc_mean": final_val_mean,
+                "final_valid_acc_max": final_val_max,
+                "final_train_acc_mean": final_train_mean,
+                "final_train_acc_max": final_train_max,
+                "run_ids": group.get("run_ids", []),
+            }
+        )
+
+    summaries.sort(
+        key=lambda item: (
+            -np.nan_to_num(item["best_valid_acc_mean"], nan=-np.inf),
+            item["activation"],
+            item["weights_init"],
+        )
+    )
+
+    if print_table:
+        if not summaries:
+            print("No runs with activation and weights_init summaries were found.")
+        else:
+            header = (
+                f"{'Activation':<10} {'Init':<8} {'Runs':>4} "
+                f"{'Best μ':>8} {'Best ↑':>8} {'Val μ':>8} {'Val ↑':>8} {'Train μ':>8}"
+            )
+            print("Activation/Initializer performance for", project_path)
+            print(header)
+            print("-" * len(header))
+
+            def _fmt(value: float) -> str:
+                return f"{value:.4f}" if not np.isnan(value) else "   NA"
+
+            for entry in summaries:
+                print(
+                    f"{entry['activation']:<10} {entry['weights_init']:<8} {entry['run_count']:>4} "
+                    f"{_fmt(entry['best_valid_acc_mean']):>8} {_fmt(entry['best_valid_acc_max']):>8} "
+                    f"{_fmt(entry['final_valid_acc_mean']):>8} {_fmt(entry['final_valid_acc_max']):>8} "
+                    f"{_fmt(entry['final_train_acc_mean']):>8}"
+                )
+
+    return summaries
+
+
+def build_activation_init_summary_dataframe(
+    summaries: List[Dict[str, Any]],
+) -> Any:
+    """Return a pandas DataFrame with human-friendly column names for summaries.
+
+    This is a thin wrapper so notebooks for different datasets can reuse the
+    same table layout when comparing activation/initializer pairs.
+    """
+
+    # Local import to avoid making pandas a hard dependency of this module
+    import pandas as pd  # type: ignore
+
+    summary_df = pd.DataFrame(summaries)
+    renamed_df = summary_df.rename(
+        columns={
+            "activation": "Activation",
+            "weights_init": "Weights Init",
+            "run_count": "Run Count",
+            "best_valid_acc_mean": "Best Validation Mean",
+            "best_valid_acc_max": "Best Validation Max",
+            "final_valid_acc_mean": "Final Validation Mean",
+            "final_valid_acc_max": "Final Validation Max",
+            "final_train_acc_mean": "Final Training Mean",
+            "final_train_acc_max": "Final Training Max",
+        },
+    )
+    ordered_columns = [
+        "Activation",
+        "Weights Init",
+        "Run Count",
+        "Best Validation Mean",
+        "Best Validation Max",
+        "Final Validation Mean",
+        "Final Validation Max",
+        "Final Training Mean",
+        "Final Training Max",
+    ]
+    # Only keep columns that actually exist to be robust to missing keys
+    existing_cols = [c for c in ordered_columns if c in renamed_df.columns]
+    return renamed_df[existing_cols]
+
+
+def create_loss_figure(history: Dict[str, List[float]], *, subtitle: Optional[str] = None) -> Optional[Any]:
     """Build a loss curve figure from the training history."""
     train_loss = history.get("train_loss", [])
     valid_loss = history.get("valid_loss", [])
@@ -717,13 +924,16 @@ def create_loss_figure(history: Dict[str, List[float]]) -> Optional[Any]:
         ax.plot(valid_loss, label="valid loss")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
-    ax.set_title("Training and validation loss")
+    if subtitle:
+        ax.set_title(f"Training and validation loss ({subtitle})")
+    else:
+        ax.set_title("Training and validation loss")
     ax.legend()
     fig.tight_layout()
     return fig
 
 
-def create_accuracy_figure(history: Dict[str, List[float]]) -> Optional[Any]:
+def create_accuracy_figure(history: Dict[str, List[float]], *, subtitle: Optional[str] = None) -> Optional[Any]:
     """Build an accuracy curve figure from the training history."""
     train_acc = history.get("train_acc", [])
     valid_acc = history.get("valid_acc", [])
@@ -735,13 +945,16 @@ def create_accuracy_figure(history: Dict[str, List[float]]) -> Optional[Any]:
         ax.plot(valid_acc, label="valid accuracy")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Accuracy")
-    ax.set_title("Training and validation accuracy")
+    if subtitle:
+        ax.set_title(f"Training and validation accuracy ({subtitle})")
+    else:
+        ax.set_title("Training and validation accuracy")
     ax.legend()
     fig.tight_layout()
     return fig
 
 
-def create_gradient_norm_figure(history: Dict[str, List[List[float]]], model: FFNN) -> Optional[Any]:
+def create_gradient_norm_figure(history: Dict[str, List[List[float]]], model: FFNN, *, subtitle: Optional[str] = None) -> Optional[Any]:
     """Build a gradient norm figure from the training history."""
     grad_norms = history.get("grad_norms", [])
     if not grad_norms:
@@ -759,13 +972,16 @@ def create_gradient_norm_figure(history: Dict[str, List[List[float]]], model: FF
         ax.plot(grad_array[:, layer_idx], label=label)
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Gradient norm (L2)")
-    ax.set_title("Gradient norms across training")
+    if subtitle:
+        ax.set_title(f"Gradient norms across training ({subtitle})")
+    else:
+        ax.set_title("Gradient norms across training")
     ax.legend()
     fig.tight_layout()
     return fig
 
 
-def create_param_hist_figure(history: Dict[str, List[List[dict]]], model: FFNN) -> Optional[Any]:
+def create_param_hist_figure(history: Dict[str, List[List[dict]]], model: FFNN, *, subtitle: Optional[str] = None) -> Optional[Any]:
     """Build parameter histogram figures for the final epoch."""
     histograms = history.get("param_histograms", [])
     if not histograms:
@@ -799,11 +1015,13 @@ def create_param_hist_figure(history: Dict[str, List[List[dict]]], model: FFNN) 
     total_slots = rows * cols
     for idx in range(len(final_hist), total_slots):
         fig.delaxes(axes[idx // cols, idx % cols])
+    if subtitle:
+        fig.suptitle(f"Parameter histograms ({subtitle})", y=1.02)
     fig.tight_layout()
     return fig
 
 
-def create_weight_bias_hist_figure(model: FFNN, bins: int = 30) -> Optional[Any]:
+def create_weight_bias_hist_figure(model: FFNN, bins: int = 30, *, subtitle: Optional[str] = None) -> Optional[Any]:
     """Plot separate histograms for weights and biases per layer."""
     num_layers = len(model.W)
     if num_layers == 0:
@@ -825,6 +1043,8 @@ def create_weight_bias_hist_figure(model: FFNN, bins: int = 30) -> Optional[Any]
         bias_ax.set_xlabel("Value")
         weight_ax.set_ylabel("Count")
         bias_ax.set_ylabel("Count")
+    if subtitle:
+        fig.suptitle(f"Weights and biases ({subtitle})", y=1.02)
     fig.tight_layout()
     return fig
 
@@ -881,12 +1101,16 @@ def create_confusion_matrix_figure(
     *,
     class_names: Optional[List[str]] = None,
     title: str = "Confusion Matrix",
+    subtitle: Optional[str] = None,
 ) -> Any:
     """Build a confusion matrix heatmap figure."""
     class_labels = class_names if class_names is not None else [str(i) for i in range(conf_mat_norm.shape[0])]
     fig, ax = plt.subplots(figsize=(7, 6))
     im = ax.imshow(conf_mat_norm, cmap="Reds", vmin=0.0, vmax=1.0)
-    ax.set_title(title)
+    if subtitle:
+        ax.set_title(f"{title} ({subtitle})") # add subtitle for confusion matrix (e.g., activation_function + weights_init)
+    else:
+        ax.set_title(title)
     ax.set_xlabel("Predicted class")
     ax.set_ylabel("True class")
     ax.set_xticks(np.arange(len(class_labels)))
@@ -920,23 +1144,25 @@ def prepare_training_artifacts(
         "confusion_table": None,
     }
 
-    acc_fig = create_accuracy_figure(history)
+    subtitle = f"{model.weights_init} + {model.act.name}" #subtitle  (weights_init + activation)
+
+    acc_fig = create_accuracy_figure(history, subtitle=subtitle)
     if acc_fig is not None:
         artifacts["figures"]["accuracy_curves"] = acc_fig
 
-    loss_fig = create_loss_figure(history)
+    loss_fig = create_loss_figure(history, subtitle=subtitle)
     if loss_fig is not None:
         artifacts["figures"]["loss_curves"] = loss_fig
 
-    grad_fig = create_gradient_norm_figure(history, model)
+    grad_fig = create_gradient_norm_figure(history, model, subtitle=subtitle)
     if grad_fig is not None:
         artifacts["figures"]["gradient_norms"] = grad_fig
 
-    hist_fig = create_param_hist_figure(history, model)
+    hist_fig = create_param_hist_figure(history, model, subtitle=subtitle)
     if hist_fig is not None:
         artifacts["figures"]["param_histograms"] = hist_fig
 
-    weight_bias_fig = create_weight_bias_hist_figure(model)
+    weight_bias_fig = create_weight_bias_hist_figure(model, subtitle=subtitle)
     if weight_bias_fig is not None:
         artifacts["figures"]["weight_bias_histograms"] = weight_bias_fig
 
@@ -959,6 +1185,7 @@ def prepare_training_artifacts(
         eval_payload["confusion_matrix_normalized"],
         class_names=class_labels,
         title="Confusion Matrix",
+        subtitle=subtitle,
     )
     artifacts["figures"]["confusion_matrix"] = conf_fig
 
@@ -968,6 +1195,10 @@ def prepare_training_artifacts(
         "preds": eval_payload["y_pred_labels"].tolist(),
         "class_names": class_labels,
     }
+
+    # Activation/initializer pairing summary for quick comparison across runs.
+    artifacts["summary"]["summary/activation"] = model.act.name
+    artifacts["summary"]["summary/weights_init"] = model.weights_init
 
     return artifacts
 
