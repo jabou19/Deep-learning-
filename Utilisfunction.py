@@ -675,6 +675,7 @@ def run_wandb_sweep(
     config_overrides: Optional[Dict[str, Any]] = None,
     init_kwargs: Optional[Dict[str, Any]] = None,
     count: Optional[int] = None,
+    dataset_name: Optional[str] = None,
 ) -> str:
     """Launch a W&B sweep that reuses `train_ffnn` for each sampled config."""
 
@@ -739,6 +740,7 @@ def run_wandb_sweep(
                     X_test=X_test,
                     y_test=y_test,
                     class_names=class_names,
+                    dataset_name=dataset_name,
                 )
                 log_wandb_artifacts(
                     run,
@@ -912,7 +914,9 @@ def build_activation_init_summary_dataframe(
     return renamed_df[existing_cols]
 
 
-def create_loss_figure(history: Dict[str, List[float]], *, subtitle: Optional[str] = None) -> Optional[Any]:
+def create_loss_figure(
+    history: Dict[str, List[float]], *, subtitle: Optional[str] = None, dataset_name: Optional[str] = None
+) -> Optional[Any]:
     """Build a loss curve figure from the training history."""
     train_loss = history.get("train_loss", [])
     valid_loss = history.get("valid_loss", [])
@@ -924,16 +928,21 @@ def create_loss_figure(history: Dict[str, List[float]], *, subtitle: Optional[st
         ax.plot(valid_loss, label="valid loss")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
+    main_title = "Training and validation loss"
+    if dataset_name:
+        main_title = f"{dataset_name}: {main_title}"
     if subtitle:
-        ax.set_title(f"Training and validation loss ({subtitle})")
+        ax.set_title(f"{main_title} ({subtitle})")
     else:
-        ax.set_title("Training and validation loss")
+        ax.set_title(main_title)
     ax.legend()
     fig.tight_layout()
     return fig
 
 
-def create_accuracy_figure(history: Dict[str, List[float]], *, subtitle: Optional[str] = None) -> Optional[Any]:
+def create_accuracy_figure(
+    history: Dict[str, List[float]], *, subtitle: Optional[str] = None, dataset_name: Optional[str] = None
+) -> Optional[Any]:
     """Build an accuracy curve figure from the training history."""
     train_acc = history.get("train_acc", [])
     valid_acc = history.get("valid_acc", [])
@@ -945,16 +954,21 @@ def create_accuracy_figure(history: Dict[str, List[float]], *, subtitle: Optiona
         ax.plot(valid_acc, label="valid accuracy")
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Accuracy")
+    main_title = "Training and validation accuracy"
+    if dataset_name:
+        main_title = f"{dataset_name}: {main_title}"
     if subtitle:
-        ax.set_title(f"Training and validation accuracy ({subtitle})")
+        ax.set_title(f"{main_title} ({subtitle})")
     else:
-        ax.set_title("Training and validation accuracy")
+        ax.set_title(main_title)
     ax.legend()
     fig.tight_layout()
     return fig
 
 
-def create_gradient_norm_figure(history: Dict[str, List[List[float]]], model: FFNN, *, subtitle: Optional[str] = None) -> Optional[Any]:
+def create_gradient_norm_figure(
+    history: Dict[str, List[List[float]]], model: FFNN, *, subtitle: Optional[str] = None, dataset_name: Optional[str] = None
+) -> Optional[Any]:
     """Build a gradient norm figure from the training history."""
     grad_norms = history.get("grad_norms", [])
     if not grad_norms:
@@ -972,16 +986,21 @@ def create_gradient_norm_figure(history: Dict[str, List[List[float]]], model: FF
         ax.plot(grad_array[:, layer_idx], label=label)
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Gradient norm (L2)")
+    main_title = "Gradient norms across training"
+    if dataset_name:
+        main_title = f"{dataset_name}: {main_title}"
     if subtitle:
-        ax.set_title(f"Gradient norms across training ({subtitle})")
+        ax.set_title(f"{main_title} ({subtitle})")
     else:
-        ax.set_title("Gradient norms across training")
+        ax.set_title(main_title)
     ax.legend()
     fig.tight_layout()
     return fig
 
 
-def create_param_hist_figure(history: Dict[str, List[List[dict]]], model: FFNN, *, subtitle: Optional[str] = None) -> Optional[Any]:
+def create_param_hist_figure(
+    history: Dict[str, List[List[dict]]], model: FFNN, *, subtitle: Optional[str] = None, dataset_name: Optional[str] = None
+) -> Optional[Any]:
     """Build parameter histogram figures for the final epoch."""
     histograms = history.get("param_histograms", [])
     if not histograms:
@@ -1015,13 +1034,21 @@ def create_param_hist_figure(history: Dict[str, List[List[dict]]], model: FFNN, 
     total_slots = rows * cols
     for idx in range(len(final_hist), total_slots):
         fig.delaxes(axes[idx // cols, idx % cols])
-    if subtitle:
-        fig.suptitle(f"Parameter histograms ({subtitle})", y=1.02)
+    if subtitle or dataset_name:
+        main_title = "Parameter histograms"
+        if dataset_name:
+            main_title = f"{dataset_name}: {main_title}"
+        if subtitle:
+            fig.suptitle(f"{main_title} ({subtitle})", y=1.02)
+        else:
+            fig.suptitle(main_title, y=1.02)
     fig.tight_layout()
     return fig
 
 
-def create_weight_bias_hist_figure(model: FFNN, bins: int = 30, *, subtitle: Optional[str] = None) -> Optional[Any]:
+def create_weight_bias_hist_figure(
+    model: FFNN, bins: int = 30, *, subtitle: Optional[str] = None, dataset_name: Optional[str] = None
+) -> Optional[Any]:
     """Plot separate histograms for weights and biases per layer."""
     num_layers = len(model.W)
     if num_layers == 0:
@@ -1037,14 +1064,23 @@ def create_weight_bias_hist_figure(model: FFNN, bins: int = 30, *, subtitle: Opt
             layer_name = f"Hidden layer {layer_idx + 1}"
         else:
             layer_name = "Output layer"
-        weight_ax.set_title(f"{layer_name} weights")
-        bias_ax.set_title(f"{layer_name} biases")
+        layer_title = layer_name
+        if dataset_name:
+            layer_title = f"{dataset_name}: {layer_title}"
+        weight_ax.set_title(f"{layer_title} weights")
+        bias_ax.set_title(f"{layer_title} biases")
         weight_ax.set_xlabel("Value")
         bias_ax.set_xlabel("Value")
         weight_ax.set_ylabel("Count")
         bias_ax.set_ylabel("Count")
-    if subtitle:
-        fig.suptitle(f"Weights and biases ({subtitle})", y=1.02)
+    if subtitle or dataset_name:
+        main_title = "Weights and biases"
+        if dataset_name:
+            main_title = f"{dataset_name}: {main_title}"
+        if subtitle:
+            fig.suptitle(f"{main_title} ({subtitle})", y=1.02)
+        else:
+            fig.suptitle(main_title, y=1.02)
     fig.tight_layout()
     return fig
 
@@ -1102,15 +1138,19 @@ def create_confusion_matrix_figure(
     class_names: Optional[List[str]] = None,
     title: str = "Confusion Matrix",
     subtitle: Optional[str] = None,
+    dataset_name: Optional[str] = None,
 ) -> Any:
     """Build a confusion matrix heatmap figure."""
     class_labels = class_names if class_names is not None else [str(i) for i in range(conf_mat_norm.shape[0])]
     fig, ax = plt.subplots(figsize=(7, 6))
     im = ax.imshow(conf_mat_norm, cmap="Reds", vmin=0.0, vmax=1.0)
+    main_title = title
+    if dataset_name:
+        main_title = f"{dataset_name}: {main_title}"
     if subtitle:
-        ax.set_title(f"{title} ({subtitle})") # add subtitle for confusion matrix (e.g., activation_function + weights_init)
+        ax.set_title(f"{main_title} ({subtitle})")  # add subtitle for confusion matrix (e.g., activation_function + weights_init)
     else:
-        ax.set_title(title)
+        ax.set_title(main_title)
     ax.set_xlabel("Predicted class")
     ax.set_ylabel("True class")
     ax.set_xticks(np.arange(len(class_labels)))
@@ -1134,6 +1174,7 @@ def prepare_training_artifacts(
     X_test: np.ndarray,
     y_test: np.ndarray,
     class_names: Optional[np.ndarray] = None,
+    dataset_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Construct reusable evaluation artifacts (figures, metrics, confusion table)."""
 
@@ -1146,23 +1187,23 @@ def prepare_training_artifacts(
 
     subtitle = f"{model.weights_init} + {model.act.name}" #subtitle  (weights_init + activation)
 
-    acc_fig = create_accuracy_figure(history, subtitle=subtitle)
+    acc_fig = create_accuracy_figure(history, subtitle=subtitle, dataset_name=dataset_name)
     if acc_fig is not None:
         artifacts["figures"]["accuracy_curves"] = acc_fig
 
-    loss_fig = create_loss_figure(history, subtitle=subtitle)
+    loss_fig = create_loss_figure(history, subtitle=subtitle, dataset_name=dataset_name)
     if loss_fig is not None:
         artifacts["figures"]["loss_curves"] = loss_fig
 
-    grad_fig = create_gradient_norm_figure(history, model, subtitle=subtitle)
+    grad_fig = create_gradient_norm_figure(history, model, subtitle=subtitle, dataset_name=dataset_name)
     if grad_fig is not None:
         artifacts["figures"]["gradient_norms"] = grad_fig
 
-    hist_fig = create_param_hist_figure(history, model, subtitle=subtitle)
+    hist_fig = create_param_hist_figure(history, model, subtitle=subtitle, dataset_name=dataset_name)
     if hist_fig is not None:
         artifacts["figures"]["param_histograms"] = hist_fig
 
-    weight_bias_fig = create_weight_bias_hist_figure(model, subtitle=subtitle)
+    weight_bias_fig = create_weight_bias_hist_figure(model, subtitle=subtitle, dataset_name=dataset_name)
     if weight_bias_fig is not None:
         artifacts["figures"]["weight_bias_histograms"] = weight_bias_fig
 
@@ -1186,6 +1227,7 @@ def prepare_training_artifacts(
         class_names=class_labels,
         title="Confusion Matrix",
         subtitle=subtitle,
+        dataset_name=dataset_name,
     )
     artifacts["figures"]["confusion_matrix"] = conf_fig
 
